@@ -1,0 +1,92 @@
+"""Short-lived visual tracking between independently decoded ArUco observations."""
+
+import cv2
+import numpy as np
+
+
+class CornerTracker:
+    """Track only a previously decoded ID, with bidirectional and geometry checks."""
+
+    def __init__(self, max_duration=1.0, max_frame_gap=0.2):
+        self.max_duration = max_duration
+        self.max_frame_gap = max_frame_gap
+        self.clear()
+
+    def clear(self):
+        self.gray = None
+        self.points = None
+        self.marker_id = None
+        self.decoded_at = None
+        self.frame_at = None
+
+    def seed(self, gray, points, marker_id, stamp):
+        self.gray = gray.copy()
+        self.points = np.asarray(points, np.float32).reshape(4, 1, 2)
+        self.marker_id = marker_id
+        self.decoded_at = self.frame_at = stamp
+
+    def update(self, gray, marker_id, stamp):
+        if (
+            self.gray is None
+            or marker_id != self.marker_id
+            or gray.shape != self.gray.shape
+            or not 0 < stamp - self.frame_at <= self.max_frame_gap
+            or not 0 <= stamp - self.decoded_at <= self.max_duration
+        ):
+            self.clear()
+            return None
+        options = dict(
+            winSize=(15, 15),
+            maxLevel=2,
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+        )
+        forward, status, error = cv2.calcOpticalFlowPyrLK(
+            self.gray, gray, self.points, None, **options
+        )
+        if forward is None or not status.all() or not np.isfinite(forward).all():
+            self.clear()
+            return None
+        backward, back_status, _ = cv2.calcOpticalFlowPyrLK(
+            gray, self.gray, forward, None, **options
+        )
+        if (
+            backward is None
+            or not back_status.all()
+            or not np.isfinite(backward).all()
+            or not np.isfinite(error).all()
+            or np.max(np.linalg.norm(backward - self.points, axis=2)) > 1.0
+            or float(error.max()) > 25.0
+        ):
+            self.clear()
+            return None
+        points = forward.reshape(4, 2)
+        old_area = abs(cv2.contourArea(self.points))
+        area = abs(cv2.contourArea(points))
+        h, w = gray.shape
+        if (
+            not cv2.isContourConvex(points)
+            or area < 25
+            or old_area <= 0
+            or not 0.6 < area / old_area < 1.6
+            or np.max(np.linalg.norm(forward - self.points, axis=2)) > 30
+            or np.any(points < 2)
+            or np.any(points[:, 0] > w - 3)
+            or np.any(points[:, 1] > h - 3)
+        ):
+            self.clear()
+            return None
+        self.gray, self.points, self.frame_at = gray.copy(), forward, stamp
+        return points
+
+
+def detect_with_fallback(gray, detector, fallback_detector, expected_id, scale=3):
+    """Retry decoding an enlarged image; always return original-image coordinates."""
+    corners, ids, _ = detector.detectMarkers(gray)
+    if expected_id is None or (ids is not None and expected_id in ids):
+        return corners, ids
+    enlarged = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    extra_corners, extra_ids, _ = fallback_detector.detectMarkers(enlarged)
+    if extra_ids is not None and expected_id in extra_ids:
+        index = list(extra_ids.flatten()).index(expected_id)
+        return [extra_corners[index] / scale], np.array([[expected_id]])
+    return corners, ids

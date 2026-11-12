@@ -1,0 +1,14 @@
+/build/
+/install/
+/log/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+.env
+.env.*
+*.bag
+*.db3
+*.mcap
+/diagnostics/
+/docs/
