@@ -55,25 +55,44 @@ ros2 launch erl1 spawn_assignment.launch.py
 
 ```bash
 source ~/aruco_treasure_hunt_ws/install/setup.bash
-ros2 launch aruco_navigator aruco_navigator.launch.py use_sim_time:=true
+ros2 launch aruco_navigator aruco_navigator.launch.py use_sim_time:=true \
+  image_topic:=/camera/image camera_info_topic:=/camera/camera_info \
+  odom_topic:=/odom cmd_vel_topic:=/cmd_vel
 ```
+
+The launch file defaults are for the real ROSbot, so the simulation topics and `use_sim_time:=true` are given explicitly here.
 
 The camera image is bridged with `ros_gz_image image_bridge` as described in the course CV notes. `/camera/camera_info`, `/odom`, `/cmd_vel`, and `/clock` use `ros_gz_bridge`. Check actual topics with `ros2 topic list` if the course Gazebo version or robot description differs.
 
 ## ROSbot
 
-Build/source the package on the workstation or robot with matching ROS 2 distribution and OpenCV ArUco support. Connect to the assigned ROS domain (10/11/12 for rosbot_1/2/3), then set actual image, camera info, odometry and command topics for the robot. Example (confirm topic names on the specific robot with `ros2 topic list`):
+Use the robot's ROS domain (course sheet: 10/11/12 for rosbot_1/2/3; `ros2 topic list | grep rosbot` must show the robot's topics), the default Fast DDS, and do not set `ROS_LOCALHOST_ONLY=1`.
 
 ```bash
-ros2 launch aruco_navigator aruco_navigator.launch.py \
-  use_sim_time:=false \
-  image_topic:=/camera/color/image_raw \
-  camera_info_topic:=/camera/color/camera_info \
-  odom_topic:=/odometry/filtered \
-  cmd_vel_topic:=/cmd_vel
+cd ~/aruco_treasure_hunt_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch aruco_navigator aruco_navigator.launch.py robot:=rosbot_1
 ```
 
-The desired marker side defaults to 166 px in simulation. The node scales this by `fx_robot / sim_focal_length` using `/camera_info`; the supplied simulation camera reports `fx = 381.36 px`, which is the default `sim_focal_length`. Configure topic names as launch arguments or ROS parameters. The controller expects a forward-positive `cmd_vel` and odometry yaw in radians. The assignment permits `/odom` or EKF `/odometry/filtered`; use the latter on a ROSbot when its EKF is running.
+With no other arguments the launch file uses `use_sim_time:=false` and the ROSbot topic names (`robot:=rosbot_2` or `rosbot_3` changes the namespace):
+
+| Input | Topic on rosbot_1 |
+|---|---|
+| Camera | `/rosbot_1/camera/rgb/image_raw` (320x240, `rgb8`) |
+| Calibration | `/rosbot_1/camera/rgb/camera_info` (fx = 288.02 px) |
+| Odometry | `/rosbot_1/odometry/filtered` |
+| Command | `/rosbot_1/cmd_vel` (`geometry_msgs/msg/Twist`) |
+
+The desired marker side is scaled from `camera_info`: 166 x 288.02 / 381.36 = 125.4 px on the ROSbot.
+
+Add `image_transport:=compressed` to receive JPEG frames from `/rosbot_1/camera/rgb/image_raw/compressed` instead (about 30 KB per frame instead of 230 KB), which helps on a busy Wi-Fi network.
+
+The robot's clock does not have to match the laptop's. Frame delay is measured relative to the smallest delay seen in the last few seconds, so a constant offset is ignored; the node prints the offset once at startup. Synchronize the clocks anyway for RViz and TF.
+
+If the robot does not move, the node prints `Holding still, waiting for ...` with the missing input (camera_info, camera images or odometry).
+
+Speed changes are ramped (`max_linear_accel` 0.3 m/s^2 and `max_angular_accel` 1.0 rad/s^2, both launch arguments), and short Wi-Fi gaps do not stop the robot: a marker counts as lost after 0.4 s without it, and camera or odometry after 1 s.
 
 ## Interface
 

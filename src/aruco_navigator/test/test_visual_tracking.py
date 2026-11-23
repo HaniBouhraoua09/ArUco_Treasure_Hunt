@@ -8,8 +8,12 @@ import numpy as np
 import pytest
 from rclpy.time import Time
 
-from aruco_navigator.aruco_navigator_node import ArucoNavigatorNode, State
-from aruco_navigator.marker_tracking import CornerTracker
+from geometry_msgs.msg import Twist
+
+from aruco_navigator.aruco_navigator_node import ArucoNavigatorNode, State, ramp
+import cv2
+
+from aruco_navigator.marker_tracking import CornerTracker, FrameDelay
 
 
 @pytest.fixture
@@ -41,6 +45,7 @@ def controller():
             "search_angular_vel": 0.12,
             "sensor_timeout_sec": 0.5,
             "image_max_latency_sec": 0.5,
+            "clock_offset_warn_sec": 1.0,
         },
         state=State.ALIGNING,
         marker_id=3,
@@ -59,6 +64,8 @@ def controller():
         detector=Mock(),
         fallback_detector=Mock(),
         tracker=CornerTracker(),
+        frame_delay=FrameDelay(),
+        clock_offset_warned=False,
         calibrated=True,
         last_image_wall=time.monotonic(),
         last_odom_wall=time.monotonic(),
@@ -71,6 +78,8 @@ def controller():
     )
     node.fallback_detector.detectMarkers.return_value = ([], None, [])
     node.expected_marker_id = lambda: ArucoNavigatorNode.expected_marker_id(node)
+    # Controller tests check the raw command; ramping is tested separately below.
+    node.publish_cmd = node.cmd_pub.publish
     return node
 
 
@@ -205,3 +214,67 @@ def test_recovery_does_not_advance_towards_close_marker(controller):
     controller.last_seen = Time(seconds=9)
     assert command(controller).linear.x == 0
     assert controller.state != State.RECOVERING
+
+
+def test_robot_clock_offset_does_not_block_frames(controller):
+    # Recorded on rosbot_1: camera stamps were 1889.8 s behind the laptop clock.
+    controller.last_image_wall = None
+    controller.get_clock.return_value.now = lambda: Time(seconds=1899.8)
+    frame(controller)  # Camera timestamp is 10 seconds.
+    controller.detector.detectMarkers.assert_called_once()
+    assert controller.last_image_wall is not None
+    warning = controller.get_logger().warning.call_args_list[0].args[0]
+    assert "1889.8 s" in warning
+
+
+def test_frame_arriving_late_is_dropped(controller):
+    frame(controller)
+    controller.detector.detectMarkers.reset_mock()
+    controller.get_clock.return_value.now = lambda: Time(seconds=10.8)
+    frame(controller)  # Same stamp, 0.8 s later than the best delay so far.
+    controller.detector.detectMarkers.assert_not_called()
+
+
+def test_compressed_frame_is_decoded(controller):
+    controller.detector.detectMarkers.return_value = ([], None, [])
+    ok, jpeg = cv2.imencode(".jpg", np.full((240, 320, 3), 128, np.uint8))
+    assert ok
+    msg = SimpleNamespace(
+        header=SimpleNamespace(stamp=SimpleNamespace(sec=10, nanosec=0)),
+        format="rgb8; jpeg compressed bgr8",
+        data=jpeg.tobytes(),
+    )
+    ArucoNavigatorNode.on_image(controller, msg)
+    gray = controller.detector.detectMarkers.call_args.args[0]
+    assert gray.shape == (240, 320)
+    assert controller.latest_image.shape == (240, 320, 3)
+
+
+def test_recovery_resumes_same_marker_without_reconfirming(controller):
+    controller.state = State.RECOVERING
+    frame(controller)
+    assert controller.state == State.ALIGNING
+
+
+def test_ramp_limits_speed_changes():
+    assert ramp(0.0, 0.18, 0.3, 0.6, 0.05) == pytest.approx(0.015)
+    assert ramp(0.18, 0.0, 0.3, 0.6, 0.05) == pytest.approx(0.15)
+    assert ramp(0.01, 0.0, 0.3, 0.6, 0.05) == 0.0
+    assert ramp(0.1, -0.1, 0.3, 0.6, 0.05) == pytest.approx(0.07)  # Slows before reversing.
+
+
+def test_published_command_is_acceleration_limited(controller):
+    controller.p.update(
+        control_period_sec=0.05,
+        max_linear_accel=0.3,
+        max_linear_decel=0.6,
+        max_angular_accel=1.0,
+        max_angular_decel=1.5,
+    )
+    controller.last_cmd, controller.last_cmd_wall = (0.0, 0.0), None
+    target = Twist()
+    target.linear.x, target.angular.z = 0.18, -0.35
+    ArucoNavigatorNode.publish_cmd(controller, target)
+    out = controller.cmd_pub.publish.call_args.args[0]
+    assert out.linear.x == pytest.approx(0.015)
+    assert out.angular.z == pytest.approx(-0.05)

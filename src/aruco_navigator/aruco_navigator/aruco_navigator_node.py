@@ -9,9 +9,21 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import CameraInfo, Image
+from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 from std_msgs.msg import String
-from aruco_navigator.marker_tracking import CornerTracker, detect_with_fallback
+from aruco_navigator.marker_tracking import (
+    CornerTracker,
+    FrameDelay,
+    detect_with_fallback,
+    make_detector,
+)
+
+
+def ramp(current, target, accel, decel, dt):
+    """Step current toward target, limited by accel when speeding up and decel otherwise."""
+    speeding_up = abs(target) > abs(current) and target * current >= 0
+    step = (accel if speeding_up else decel) * dt
+    return current + max(-step, min(step, target - current))
 
 
 class State(Enum):
@@ -28,6 +40,8 @@ class ArucoNavigatorNode(Node):
         super().__init__("aruco_navigator")
         defaults = {
             "image_topic": "/camera/image",
+            # "raw" subscribes to image_topic, "compressed" to image_topic/compressed.
+            "image_transport": "raw",
             "odom_topic": "/odom",
             "cmd_vel_topic": "/cmd_vel",
             "camera_info_topic": "/camera/camera_info",
@@ -56,11 +70,20 @@ class ArucoNavigatorNode(Node):
             "alignment_stop_error_fraction": 0.15,
             "alignment_near_target_ratio": 0.8,
             "marker_timeout_sec": 4.0,
-            "control_period_sec": 0.1,
-            "observation_stale_sec": 0.15,
+            "control_period_sec": 0.05,
+            # Over Wi-Fi about 12% of camera gaps exceed 0.15 s and odometry gaps
+            # often exceed 0.5 s, so shorter limits make the robot stop and go.
+            "observation_stale_sec": 0.4,
             "tracking_max_duration_sec": 1.0,
-            "sensor_timeout_sec": 0.5,
+            "sensor_timeout_sec": 1.0,
+            # Acceleration limits (m/s^2, rad/s^2) applied to every command.
+            "max_linear_accel": 0.3,
+            "max_linear_decel": 0.6,
+            "max_angular_accel": 1.0,
+            "max_angular_decel": 1.5,
+            # Frame delay beyond the best recent delay; robot clock offset is ignored.
             "image_max_latency_sec": 0.5,
+            "clock_offset_warn_sec": 1.0,
             "recovery_speed": 0.06,
             "recovery_max_distance_m": 0.4,
             "recovery_timeout_sec": 8.0,
@@ -69,19 +92,15 @@ class ArucoNavigatorNode(Node):
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         self.p = {name: self.get_parameter(name).value for name in defaults}
-        self.detector = cv2.aruco.ArucoDetector(
-            cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_ARUCO_ORIGINAL),
-            cv2.aruco.DetectorParameters(),
-        )
-        fallback_parameters = cv2.aruco.DetectorParameters()
-        fallback_parameters.adaptiveThreshWinSizeMin = 5
-        fallback_parameters.adaptiveThreshWinSizeMax = 35
-        fallback_parameters.adaptiveThreshWinSizeStep = 2
-        self.fallback_detector = cv2.aruco.ArucoDetector(
-            cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_ARUCO_ORIGINAL),
-            fallback_parameters,
+        self.detector = make_detector()
+        self.fallback_detector = make_detector(
+            adaptiveThreshWinSizeMin=5,
+            adaptiveThreshWinSizeMax=35,
+            adaptiveThreshWinSizeStep=2,
         )
         self.tracker = CornerTracker(float(self.p["tracking_max_duration_sec"]))
+        self.frame_delay = FrameDelay()
+        self.clock_offset_warned = False
         self.last_image_wall = self.last_odom_wall = None
         self.calibrated = False
         self.observation_source = None
@@ -101,12 +120,23 @@ class ArucoNavigatorNode(Node):
         self.yaw = None
         self.target_yaw = None
         self.fx_ratio = 1.0
+        self.last_cmd = (0.0, 0.0)
+        self.last_cmd_wall = None
         self.bridge_img_pub = self.create_publisher(
             Image, self.p["marker_image_raw_topic"], 10
         )
         self.cmd_pub = self.create_publisher(Twist, self.p["cmd_vel_topic"], 10)
+        if self.p["image_transport"] == "compressed":
+            image_type = CompressedImage
+            image_topic = self.p["image_topic"].rstrip("/") + "/compressed"
+        else:
+            image_type, image_topic = Image, self.p["image_topic"]
         self.create_subscription(
-            Image, self.p["image_topic"], self.on_image, qos_profile_sensor_data
+            image_type, image_topic, self.on_image, qos_profile_sensor_data
+        )
+        self.get_logger().info(
+            f"Inputs: {image_topic}, {self.p['camera_info_topic']}, "
+            f"{self.p['odom_topic']}. Commands: {self.p['cmd_vel_topic']}."
         )
         self.create_subscription(
             Odometry, self.p["odom_topic"], self.on_odom, qos_profile_sensor_data
@@ -143,12 +173,32 @@ class ArucoNavigatorNode(Node):
     def on_image(self, msg):
         now = self.get_clock().now()
         stamp = msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
-        age = now.nanoseconds / 1e9 - stamp
-        if age < -0.05 or age > float(self.p["image_max_latency_sec"]):
+        delay = self.frame_delay.update(now.nanoseconds / 1e9, stamp)
+        offset = self.frame_delay.offset
+        if not self.clock_offset_warned and abs(offset) > float(
+            self.p["clock_offset_warn_sec"]
+        ):
+            self.clock_offset_warned = True
+            self.get_logger().warning(
+                f"Camera clock differs from this computer by {offset:.1f} s. "
+                "Frame delay is measured relative to that offset, so the controller "
+                "keeps working; synchronize the clocks for TF and RViz."
+            )
+        if delay > float(self.p["image_max_latency_sec"]):
+            self.get_logger().warning(
+                f"Dropped a frame that arrived {delay:.2f} s late.",
+                throttle_duration_sec=5.0,
+            )
             return
         self.latest_header = msg.header
         try:
-            if msg.encoding == "bgr8":
+            if hasattr(msg, "format"):
+                image = cv2.imdecode(
+                    np.frombuffer(msg.data, dtype=np.uint8), cv2.IMREAD_COLOR
+                )
+                if image is None:
+                    raise ValueError(f"Could not decode {msg.format!r}")
+            elif msg.encoding == "bgr8":
                 image = (
                     np.frombuffer(msg.data, dtype=np.uint8)
                     .reshape(msg.height, msg.step)[:, : msg.width * 3]
@@ -198,8 +248,11 @@ class ArucoNavigatorNode(Node):
                 visible.append((mid, pts, center, side))
         # While searching, confirm even a returning target before resuming motion.
         chosen = None
-        if self.state in (State.ALIGNING, State.APPROACHING):
+        if self.state in (State.ALIGNING, State.APPROACHING, State.RECOVERING):
             chosen = next((item for item in visible if item[0] == self.marker_id), None)
+            if chosen is not None and self.state == State.RECOVERING:
+                # The marker was only lost briefly: resume without re-confirming it.
+                self.state = State.ALIGNING
         if (
             chosen is None
             and visible
@@ -278,20 +331,64 @@ class ArucoNavigatorNode(Node):
                 f"Final zero velocity was not publishable during shutdown: {exc}"
             )
 
+    def publish_cmd(self, cmd):
+        """Publish cmd with acceleration limits so that speed changes are gradual."""
+        wall = time.monotonic()
+        period = float(self.p["control_period_sec"])
+        dt = (
+            period
+            if self.last_cmd_wall is None
+            else min(wall - self.last_cmd_wall, 2 * period)
+        )
+        self.last_cmd_wall = wall
+        out = Twist()
+        out.linear.x = ramp(
+            self.last_cmd[0],
+            cmd.linear.x,
+            float(self.p["max_linear_accel"]),
+            float(self.p["max_linear_decel"]),
+            dt,
+        )
+        out.angular.z = ramp(
+            self.last_cmd[1],
+            cmd.angular.z,
+            float(self.p["max_angular_accel"]),
+            float(self.p["max_angular_decel"]),
+            dt,
+        )
+        self.last_cmd = (out.linear.x, out.angular.z)
+        self.cmd_pub.publish(out)
+
     def control(self):
         cmd = Twist()
         if self.state == State.SUCCESS:
-            self.cmd_pub.publish(cmd)
+            self.publish_cmd(cmd)
             return
         wall = time.monotonic()
-        if (
-            not self.calibrated
-            or self.last_image_wall is None
-            or self.last_odom_wall is None
-            or wall - self.last_image_wall > float(self.p["sensor_timeout_sec"])
-            or wall - self.last_odom_wall > float(self.p["sensor_timeout_sec"])
-        ):
-            self.cmd_pub.publish(cmd)
+        timeout = float(self.p["sensor_timeout_sec"])
+        waiting = [
+            name
+            for name, ok in (
+                ("camera_info", self.calibrated),
+                (
+                    "camera images",
+                    self.last_image_wall is not None
+                    and wall - self.last_image_wall <= timeout,
+                ),
+                (
+                    "odometry",
+                    self.last_odom_wall is not None
+                    and wall - self.last_odom_wall <= timeout,
+                ),
+            )
+            if not ok
+        ]
+        if waiting:
+            self.get_logger().warning(
+                "Holding still, waiting for " + ", ".join(waiting) + ".",
+                throttle_duration_sec=5.0,
+            )
+            self.publish_cmd(cmd)
             return
         if self.state == State.RECOVERING:
             distance = math.dist(self.position, self.recovery_start)
@@ -349,7 +446,8 @@ class ArucoNavigatorNode(Node):
                 self.candidate_id, self.candidate_count = None, 0
                 self.tracker.clear()
                 self.get_logger().warning(
-                    "Distant marker lost; advancing slowly toward last visual bearing, with distance/time limits."
+                    "Distant marker lost; advancing slowly toward last visual bearing, "
+                    "with distance/time limits."
                 )
             elif (
                 self.observation is None
@@ -482,7 +580,7 @@ class ArucoNavigatorNode(Node):
                         cmd.angular.z = math.copysign(
                             float(self.p["min_angular_vel"]), error
                         )
-        self.cmd_pub.publish(cmd)
+        self.publish_cmd(cmd)
 
     def reached(self):
         if self.marker_id == 4:

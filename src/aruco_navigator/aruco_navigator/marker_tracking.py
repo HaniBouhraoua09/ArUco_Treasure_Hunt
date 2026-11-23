@@ -1,7 +1,64 @@
 """Short-lived visual tracking between independently decoded ArUco observations."""
 
+from collections import deque
+
 import cv2
 import numpy as np
+
+
+class FrameDelay:
+    """
+    Frame delay that ignores a constant offset between two machines' clocks.
+
+    The camera stamps frames with the robot's clock and the controller compares
+    them with its own clock, so the raw difference is the clock offset plus the
+    transport delay. The smallest difference seen recently is used as the
+    reference; a frame is late only when it arrives later than that.
+    """
+
+    def __init__(self, window_sec=5.0, clock_jump_sec=2.0):
+        self.window_sec = window_sec
+        self.clock_jump_sec = clock_jump_sec
+        self.samples = deque()
+        self.offset = None
+
+    def update(self, receive_sec, stamp_sec):
+        raw = receive_sec - stamp_sec
+        while self.samples and receive_sec - self.samples[0][0] > self.window_sec:
+            self.samples.popleft()
+        if self.samples and raw - self.samples[0][1] > self.clock_jump_sec:
+            # One of the clocks was stepped (for example by NTP): start again.
+            self.samples.clear()
+        while self.samples and self.samples[-1][1] >= raw:
+            self.samples.pop()
+        self.samples.append((receive_sec, raw))
+        self.offset = self.samples[0][1]
+        return raw - self.offset
+
+
+def make_detector(**parameters):
+    """Build a DICT_ARUCO_ORIGINAL detector on OpenCV before and after 4.7."""
+    dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_ARUCO_ORIGINAL)
+    modern = hasattr(cv2.aruco, "ArucoDetector")
+    options = (
+        cv2.aruco.DetectorParameters() if modern else cv2.aruco.DetectorParameters_create()
+    )
+    for name, value in parameters.items():
+        setattr(options, name, value)
+    if modern:
+        return cv2.aruco.ArucoDetector(dictionary, options)
+    return LegacyArucoDetector(dictionary, options)
+
+
+class LegacyArucoDetector:
+    """Same detectMarkers() call as cv2.aruco.ArucoDetector, for OpenCV 4.5 (ROS Humble)."""
+
+    def __init__(self, dictionary, parameters):
+        self.dictionary = dictionary
+        self.parameters = parameters
+
+    def detectMarkers(self, image):
+        return cv2.aruco.detectMarkers(image, self.dictionary, parameters=self.parameters)
 
 
 class CornerTracker:
