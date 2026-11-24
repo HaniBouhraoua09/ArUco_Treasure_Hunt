@@ -14,10 +14,13 @@ An autonomous mobile robot navigation and visual-servoing package implemented in
 
 ---
 
-## Demonstration Videos
+## 🎥 Demonstration Videos
 
-* **Gazebo Simulation Run:** [Watch Simulation Demo](#)
-* **Physical Husarion ROSbot 3 Run:** [Watch Real-World Lab Demo](#)
+- **Gazebo Simulation Run:**  
+  https://github.com/user-attachments/assets/806f4e54-5c3d-4a7d-b85e-1d717b23f005
+
+- **Physical Husarion ROSbot 3 Run:**  
+  https://github.com/user-attachments/assets/00e0ece4-4590-4124-abcf-07154fb41ef7
 
 ---
 
