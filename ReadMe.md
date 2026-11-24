@@ -22,7 +22,12 @@ An autonomous mobile robot navigation and visual-servoing package implemented in
 
 - **Physical Husarion ROSbot 3 Run:**
 
-  [https://github.com/user-attachments/assets/00e0ece4-4590-4124-abcf-07154fb41ef7](https://github.com/user-attachments/assets/00e0ece4-4590-4124-abcf-07154fb41ef7)
+<div align="center">
+  <video src="https://github.com/user-attachments/assets/00e0ece4-4590-4124-abcf-07154fb41ef7"
+         width="700"
+         controls>
+  </video>
+</div>
 
 ---
 
