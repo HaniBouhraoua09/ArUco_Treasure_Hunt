@@ -16,8 +16,6 @@ An autonomous mobile robot navigation and visual-servoing package implemented in
 
 ## Demonstration Videos
 
-> Replace the placeholder links below with your uploaded GitHub release or YouTube URLs.
-
 * **Gazebo Simulation Run:** [Watch Simulation Demo](#)
 * **Physical Husarion ROSbot 3 Run:** [Watch Real-World Lab Demo](#)
 
@@ -47,7 +45,7 @@ The `ArUcoTreasureHunt` node (`scripts/treasure_hunt.py`) is organized into four
   $$\psi = \text{atan2}\big(2(wz + xy),\; 1 - 2(y^2 + z^2)\big)$$
 * Runs a **20 Hz** `control_loop` timer that computes the normalized angular error to the target heading $\psi_{\text{target}}$:
   $$e_\psi = \text{atan2}\big(\sin(\psi_{\text{target}} - \psi),\; \cos(\psi_{\text{target}} - \psi)\big)$$
-* Commands proportional angular velocity $\omega = k_{\text{yaw}} \cdot e_\psi$ (bounded by a skid-steer friction floor and safe maximum speed) until $|e_\psi| \le \text{yaw\_tolerance}$.
+* Commands proportional angular velocity $\omega = k_{\text{yaw}} \cdot e_\psi$ (bounded by a skid-steer friction floor and safe maximum speed) until $\lvert e_\psi \rvert \le \psi_{\text{tol}}$.
 
 ### 4. Treasure Hunt State Machine
 The mission logic is governed by a deterministic three-state finite state machine (`SEARCH_AND_SERVO` $\rightarrow$ `ROTATING` $\rightarrow$ `DONE`) backed by a `visited_ids` set to prevent re-triggering already completed markers:
