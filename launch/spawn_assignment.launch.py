@@ -9,12 +9,15 @@ from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
 
-    pkg_erl1= get_package_share_directory('erl1')
+    pkg_erl1 = get_package_share_directory('erl1')
+
 
     gazebo_models_path, ignore_last_dir = os.path.split(pkg_erl1)
-    # lets Gazebo find package://erl1/... (e.g. the meshes)
+    aruco_models_path = os.path.join(pkg_erl1, 'models')
     gz_path = os.environ.get("GZ_SIM_RESOURCE_PATH", "")
-    os.environ["GZ_SIM_RESOURCE_PATH"] = gz_path + os.pathsep + gazebo_models_path
+    os.environ["GZ_SIM_RESOURCE_PATH"] = (
+        gz_path + os.pathsep + gazebo_models_path + os.pathsep + aruco_models_path
+    )
 
     rviz_launch_arg = DeclareLaunchArgument(
         'rviz', default_value='true',
@@ -124,7 +127,7 @@ def generate_launch_description():
         package="ros_gz_bridge",
         executable="parameter_bridge",
         arguments=[
-            "/clock@rosgraph_msgs/msg/Cloccd k[gz.msgs.Clock",
+            "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
             "/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist",
             "/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry",
             "/joint_states@sensor_msgs/msg/JointState[gz.msgs.Model",
