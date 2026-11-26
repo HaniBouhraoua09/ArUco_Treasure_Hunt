@@ -4,7 +4,7 @@
 * Hani Bouhraoua        ->       8314923
 * Richard Albert King Mechoda  -> 8525970
 * Riadh Bahri                  -> 8335614
-* Basmala Sherief             -> 8248659
+* Basmala Elbarhamtoushi             -> 8248659
 
 
 **Course:** Experimental Robotics Laboratory (`erl1`) — M.Sc. in Robotics Engineering, University of Genoa (UniGe)  
